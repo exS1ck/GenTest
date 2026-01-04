@@ -3,6 +3,8 @@ import subprocess
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(
@@ -11,8 +13,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Получаем токен из переменной окружения
+# Получаем переменные окружения
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Например: https://your-app.onrender.com
+PORT = int(os.getenv('PORT', 10000))
+
+# Создаём Flask приложение
+app = Flask(__name__)
+
+# Создаём приложение Telegram
+application = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -109,22 +119,47 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f'Update {update} caused error {context.error}')
 
-def main():
-    """Запуск бота"""
-    if not TOKEN:
-        raise ValueError('TELEGRAM_BOT_TOKEN не установлен в переменных окружения')
-    
-    # Создаём приложение
-    application = Application.builder().token(TOKEN).build()
-    
-    # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_error_handler(error_handler)
-    
-    # Запускаем бота
-    logger.info('Бот запущен')
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+# Регистрируем обработчики
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+application.add_error_handler(error_handler)
+
+@app.route('/')
+def index():
+    """Главная страница для проверки работы"""
+    return 'Bot is running!'
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Обработчик вебхука от Telegram"""
+    try:
+        json_data = request.get_json()
+        update = Update.de_json(json_data, application.bot)
+        
+        # Обрабатываем update асинхронно
+        asyncio.run(application.process_update(update))
+        
+        return 'OK'
+    except Exception as e:
+        logger.error(f'Ошибка обработки webhook: {str(e)}', exc_info=True)
+        return 'Error', 500
+
+async def setup_webhook():
+    """Настройка вебхука при запуске"""
+    webhook_url = f'{WEBHOOK_URL}/{TOKEN}'
+    await application.bot.set_webhook(url=webhook_url)
+    logger.info(f'Webhook установлен: {webhook_url}')
 
 if __name__ == '__main__':
-    main()
+    if not TOKEN:
+        raise ValueError('TELEGRAM_BOT_TOKEN не установлен')
+    if not WEBHOOK_URL:
+        raise ValueError('WEBHOOK_URL не установлен')
+    
+    # Инициализируем приложение и устанавливаем webhook
+    asyncio.run(application.initialize())
+    asyncio.run(setup_webhook())
+    
+    # Запускаем Flask сервер
+    logger.info(f'Запуск сервера на порту {PORT}')
+    app.run(host='0.0.0.0', port=PORT)
