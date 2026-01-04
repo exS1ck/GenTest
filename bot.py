@@ -1,6 +1,7 @@
 import os
 import subprocess
 import logging
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request
@@ -23,6 +24,9 @@ app = Flask(__name__)
 
 # Создаём приложение Telegram
 application = Application.builder().token(TOKEN).build()
+
+# Глобальная переменная для event loop
+main_loop = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -136,8 +140,11 @@ def webhook():
         json_data = request.get_json()
         update = Update.de_json(json_data, application.bot)
         
-        # Создаём фоновую задачу для обработки update
-        Thread(target=lambda: application.update_queue.put_nowait(update)).start()
+        # Отправляем update в основной event loop
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            main_loop
+        )
         
         return 'OK'
     except Exception as e:
@@ -150,6 +157,9 @@ def run_flask():
 
 async def main():
     """Основная функция запуска бота"""
+    global main_loop
+    main_loop = asyncio.get_event_loop()
+    
     # Инициализируем приложение
     await application.initialize()
     
@@ -158,7 +168,7 @@ async def main():
     await application.bot.set_webhook(url=webhook_url)
     logger.info(f'Webhook установлен: {webhook_url}')
     
-    # Запускаем обработку очереди
+    # Запускаем приложение
     await application.start()
     
     # Запускаем Flask в отдельном потоке
@@ -168,7 +178,6 @@ async def main():
     
     # Держим приложение запущенным
     import signal
-    import asyncio
     
     stop_event = asyncio.Event()
     
@@ -190,5 +199,4 @@ if __name__ == '__main__':
     if not WEBHOOK_URL:
         raise ValueError('WEBHOOK_URL не установлен')
     
-    import asyncio
     asyncio.run(main())
