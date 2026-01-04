@@ -4,7 +4,7 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request
-import asyncio
+from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(
@@ -136,19 +136,53 @@ def webhook():
         json_data = request.get_json()
         update = Update.de_json(json_data, application.bot)
         
-        # Обрабатываем update асинхронно
-        asyncio.run(application.process_update(update))
+        # Создаём фоновую задачу для обработки update
+        Thread(target=lambda: application.update_queue.put_nowait(update)).start()
         
         return 'OK'
     except Exception as e:
         logger.error(f'Ошибка обработки webhook: {str(e)}', exc_info=True)
         return 'Error', 500
 
-async def setup_webhook():
-    """Настройка вебхука при запуске"""
+def run_flask():
+    """Запуск Flask в отдельном потоке"""
+    app.run(host='0.0.0.0', port=PORT)
+
+async def main():
+    """Основная функция запуска бота"""
+    # Инициализируем приложение
+    await application.initialize()
+    
+    # Устанавливаем webhook
     webhook_url = f'{WEBHOOK_URL}/{TOKEN}'
     await application.bot.set_webhook(url=webhook_url)
     logger.info(f'Webhook установлен: {webhook_url}')
+    
+    # Запускаем обработку очереди
+    await application.start()
+    
+    # Запускаем Flask в отдельном потоке
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f'Flask запущен на порту {PORT}')
+    
+    # Держим приложение запущенным
+    import signal
+    import asyncio
+    
+    stop_event = asyncio.Event()
+    
+    def signal_handler(signum, frame):
+        stop_event.set()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    await stop_event.wait()
+    
+    # Остановка приложения
+    await application.stop()
+    await application.shutdown()
 
 if __name__ == '__main__':
     if not TOKEN:
@@ -156,10 +190,5 @@ if __name__ == '__main__':
     if not WEBHOOK_URL:
         raise ValueError('WEBHOOK_URL не установлен')
     
-    # Инициализируем приложение и устанавливаем webhook
-    asyncio.run(application.initialize())
-    asyncio.run(setup_webhook())
-    
-    # Запускаем Flask сервер
-    logger.info(f'Запуск сервера на порту {PORT}')
-    app.run(host='0.0.0.0', port=PORT)
+    import asyncio
+    asyncio.run(main())
